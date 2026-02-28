@@ -24,10 +24,12 @@ async def get_video_info(url: str):
         raise HTTPException(status_code=400, detail="Нужна корректная ссылка на YouTube")
     
     ydl_opts = {
-        'quiet': True,
-        'skip_download': True,
-        'no_warnings': True,
-    }
+            'format': 'best',
+            'quiet': True,
+            'no_warnings': True,
+            'cookiefile': 'cookies.txt', # <--- ДОБАВЛЯЕМ ЭТУ СТРОЧКУ
+            'skip_download': True
+        }
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
