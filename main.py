@@ -6,23 +6,25 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import mimetypes
 
-# Чиним баг Windows с чтением CSS и JS файлов
 mimetypes.add_type('text/css', '.css')
 mimetypes.add_type('application/javascript', '.js')
 
 app = FastAPI(title="YouTube Downloader API")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Функция для вытаскивания ID видео (например, dQw4w9WgXcQ) из любой ссылки
 def extract_video_id(url: str):
     match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11}).*", url)
     return match.group(1) if match else None
+
+# Легально получаем название видео через официальный API Ютуба (за это не банят)
+def get_youtube_title(url: str):
+    try:
+        oembed_url = f"https://www.youtube.com/oembed?url={url}&format=json"
+        req = urllib.request.Request(oembed_url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=3) as response:
+            return json.loads(response.read().decode()).get("title", "YouTube Видео")
+    except:
+        return "YouTube Видео"
 
 @app.get("/api/get-video-info")
 async def get_video_info(url: str):
@@ -30,78 +32,74 @@ async def get_video_info(url: str):
     if not video_id:
         raise HTTPException(status_code=400, detail="Нужна корректная ссылка на YouTube")
     
-    # Список публичных серверов-помощников (если один упадет, код пойдет к следующему)
+    title = get_youtube_title(url)
+    
+    # Мощные серверы Piped API
     instances = [
-        "https://vid.puffyan.us",
-        "https://invidious.jing.rocks",
-        "https://invidious.nerdvpn.de"
+        "https://pipedapi.kavin.rocks",
+        "https://pipedapi.tokhmi.xyz",
+        "https://api.piped.projectsegfau.lt",
+        "https://piped-api.lunar.icu",
+        "https://pipedapi.smnz.de"
     ]
     
-    data = None
     for instance in instances:
-        api_url = f"{instance}/api/v1/videos/{video_id}"
         try:
-            # Стучимся к чужому серверу
-            req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=5) as response:
+            print(f"Пытаемся подключиться к: {instance}")
+            api_url = f"{instance}/streams/{video_id}"
+            req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+            with urllib.request.urlopen(req, timeout=8) as response:
                 data = json.loads(response.read().decode())
-                break # Если получилось, выходим из цикла
-        except Exception:
-            continue # Если сервер не ответил, пробуем следующий
-            
-    if not data:
-        raise HTTPException(status_code=400, detail="Не удалось обойти защиту. Попробуйте позже или другое видео.")
+                
+                download_links = []
+                
+                # Ищем целые видео со звуком
+                for stream in data.get("videoStreams", []):
+                    if not stream.get("videoOnly", False):
+                        download_links.append({
+                            "quality": stream.get("quality", "HD"),
+                            "format": stream.get("format", "mp4").lower(),
+                            "url": stream.get("url")
+                        })
+                        
+                # Ищем аудио
+                for stream in data.get("audioStreams", []):
+                    download_links.append({
+                        "quality": "Аудио",
+                        "format": stream.get("format", "m4a").lower(),
+                        "url": stream.get("url")
+                    })
+                    break # Одного аудио хватит
+                    
+                # Ищем видео без звука
+                for stream in data.get("videoStreams", []):
+                    if stream.get("videoOnly", True):
+                        download_links.append({
+                            "quality": f"{stream.get('quality')} (Без звука)",
+                            "format": stream.get("format", "mp4").lower(),
+                            "url": stream.get("url")
+                        })
 
-    # Форматируем длительность (секунды в MM:SS)
-    length_sec = data.get("lengthSeconds", 0)
-    mins, secs = divmod(length_sec, 60)
-    
-    download_links = []
-    
-    # 1. Ищем готовые целые видео (MP4)
-    for f in data.get("formatStreams", []):
-        if f.get("container") == "mp4":
-            download_links.append({
-                "quality": f.get("qualityLabel", "HD"),
-                "format": "mp4",
-                "url": f.get("url")
-            })
+                # Фильтруем дубликаты
+                unique_links = list({v['quality']:v for v in download_links}.values())
+                
+                if unique_links:
+                    print(f"УСПЕХ! Сервер {instance} отдал ссылки.")
+                    return {
+                        "status": "success",
+                        "video_details": {
+                            "title": title,
+                            "duration": "Загружено" 
+                        },
+                        "download_links": unique_links[:5]
+                    }
+        except Exception as e:
+            # ТЕПЕРЬ МЫ ВИДИМ ОШИБКИ В ЛОГАХ RENDER
+            print(f"ОШИБКА на сервере {instance}: {e}")
+            continue
             
-    # 2. Ищем Аудио
-    for f in data.get("adaptiveFormats", []):
-        if f.get("type", "").startswith("audio/mp4"):
-            download_links.append({
-                "quality": "Аудио",
-                "format": "m4a",
-                "url": f.get("url")
-            })
-            break # Нам хватит одного хорошего аудио файла
-            
-    # 3. Ищем видео без звука
-    for f in data.get("adaptiveFormats", []):
-        if f.get("type", "").startswith("video/mp4") and f.get("qualityLabel"):
-            download_links.append({
-                "quality": f"{f.get('qualityLabel')} (Без звука)",
-                "format": "mp4",
-                "url": f.get("url")
-            })
-
-    # Убираем дубликаты
-    unique_links = []
-    seen = set()
-    for link in download_links:
-        if link["quality"] not in seen:
-            seen.add(link["quality"])
-            unique_links.append(link)
-
-    # Отдаем данные нашему фронтенду в привычном для него виде
-    return {
-        "status": "success",
-        "video_details": {
-            "title": data.get("title", "Неизвестное видео"),
-            "duration": f"{mins}:{secs:02d}"
-        },
-        "download_links": unique_links[:5]
-    }
+    # Если мы дошли сюда, значит все серверы отказали
+    print("КРИТИЧЕСКАЯ ОШИБКА: Все серверы Piped API недоступны.")
+    raise HTTPException(status_code=400, detail="Все серверы-помощники сейчас перегружены. Попробуйте через пару минут!")
 
 app.mount("/", StaticFiles(directory=".", html=True), name="static")
