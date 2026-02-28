@@ -12,11 +12,6 @@ mimetypes.add_type('application/javascript', '.js')
 app = FastAPI(title="YouTube Downloader API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-def extract_video_id(url: str):
-    match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11}).*", url)
-    return match.group(1) if match else None
-
-# Легально получаем название видео через официальный API Ютуба (за это не банят)
 def get_youtube_title(url: str):
     try:
         oembed_url = f"https://www.youtube.com/oembed?url={url}&format=json"
@@ -28,78 +23,56 @@ def get_youtube_title(url: str):
 
 @app.get("/api/get-video-info")
 async def get_video_info(url: str):
-    video_id = extract_video_id(url)
-    if not video_id:
+    if "youtube.com" not in url and "youtu.be" not in url:
         raise HTTPException(status_code=400, detail="Нужна корректная ссылка на YouTube")
     
     title = get_youtube_title(url)
+    print(f"Пробуем пробить через Cobalt: {url}")
     
-    # Мощные серверы Piped API
-    instances = [
-        "https://pipedapi.kavin.rocks",
-        "https://pipedapi.tokhmi.xyz",
-        "https://api.piped.projectsegfau.lt",
-        "https://piped-api.lunar.icu",
-        "https://pipedapi.smnz.de"
-    ]
-    
-    for instance in instances:
-        try:
-            print(f"Пытаемся подключиться к: {instance}")
-            api_url = f"{instance}/streams/{video_id}"
-            req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
-            with urllib.request.urlopen(req, timeout=8) as response:
-                data = json.loads(response.read().decode())
-                
-                download_links = []
-                
-                # Ищем целые видео со звуком
-                for stream in data.get("videoStreams", []):
-                    if not stream.get("videoOnly", False):
-                        download_links.append({
-                            "quality": stream.get("quality", "HD"),
-                            "format": stream.get("format", "mp4").lower(),
-                            "url": stream.get("url")
-                        })
-                        
-                # Ищем аудио
-                for stream in data.get("audioStreams", []):
-                    download_links.append({
-                        "quality": "Аудио",
-                        "format": stream.get("format", "m4a").lower(),
-                        "url": stream.get("url")
-                    })
-                    break # Одного аудио хватит
-                    
-                # Ищем видео без звука
-                for stream in data.get("videoStreams", []):
-                    if stream.get("videoOnly", True):
-                        download_links.append({
-                            "quality": f"{stream.get('quality')} (Без звука)",
-                            "format": stream.get("format", "mp4").lower(),
-                            "url": stream.get("url")
-                        })
-
-                # Фильтруем дубликаты
-                unique_links = list({v['quality']:v for v in download_links}.values())
-                
-                if unique_links:
-                    print(f"УСПЕХ! Сервер {instance} отдал ссылки.")
-                    return {
-                        "status": "success",
-                        "video_details": {
-                            "title": title,
-                            "duration": "Загружено" 
-                        },
-                        "download_links": unique_links[:5]
-                    }
-        except Exception as e:
-            # ТЕПЕРЬ МЫ ВИДИМ ОШИБКИ В ЛОГАХ RENDER
-            print(f"ОШИБКА на сервере {instance}: {e}")
-            continue
+    try:
+        cobalt_url = "https://api.cobalt.tools/api/json"
+        # Настройки для Cobalt (просим лучшее качество)
+        payload = json.dumps({
+            "url": url,
+            "vQuality": "1080" 
+        }).encode('utf-8')
+        
+        # Притворяемся нормальным браузером
+        req = urllib.request.Request(cobalt_url, data=payload, headers={
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Origin': 'https://cobalt.tools',
+            'Referer': 'https://cobalt.tools/'
+        })
+        
+        with urllib.request.urlopen(req, timeout=15) as response:
+            data = json.loads(response.read().decode())
             
-    # Если мы дошли сюда, значит все серверы отказали
-    print("КРИТИЧЕСКАЯ ОШИБКА: Все серверы Piped API недоступны.")
-    raise HTTPException(status_code=400, detail="Все серверы-помощники сейчас перегружены. Попробуйте через пару минут!")
+            if data.get("status") == "error":
+                raise Exception(data.get("text", "Отказ от Cobalt"))
+                
+            # Cobalt возвращает готовую прямую ссылку на скачивание
+            download_url = data.get("url")
+            
+            print("УСПЕХ! Cobalt отдал ссылку.")
+            return {
+                "status": "success",
+                "video_details": {
+                    "title": title,
+                    "duration": "Готово"
+                },
+                "download_links": [
+                    {
+                        "quality": "Лучшее доступное качество",
+                        "format": "mp4",
+                        "url": download_url
+                    }
+                ]
+            }
+            
+    except Exception as e:
+        print(f"КРИТИЧЕСКАЯ ОШИБКА COBALT: {e}")
+        raise HTTPException(status_code=400, detail="Все защиты активированы. Скачивание временно невозможно.")
 
 app.mount("/", StaticFiles(directory=".", html=True), name="static")
