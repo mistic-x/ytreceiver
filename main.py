@@ -24,33 +24,34 @@ async def get_video_info(url: str):
         raise HTTPException(status_code=400, detail="Нужна корректная ссылка на YouTube")
     
     ydl_opts = {
-            'format': 'all', # <--- Берем все форматы, не ищем "лучший", чтобы не было ошибки
             'quiet': True,
             'no_warnings': True,
-            'cookiefile': 'cookies.txt', 
-            'extractor_args': {'youtube': {'client': ['android', 'web']}},
+            'cookiefile': 'cookies.txt', # Куки работают, оставляем!
+            # МАГИЮ АНДРОИДА УБРАЛИ, чтобы вернуть целые видео
             'skip_download': True,
-            'ignoreerrors': True # <--- Игнорируем мелкие ошибки Ютуба, чтобы сервер не крашился
+            'ignoreerrors': True
         }
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             
-            # Если info пустое, значит Ютуб забанил куки
             if not info:
-                raise Exception("YouTube заблокировал запрос. Нужны новые cookies.txt")
+                raise Exception("YouTube заблокировал запрос. Нужны новые cookies.")
             
             download_links = []
             
+            # 1. Ищем форматы, где сразу есть И видео, И звук
             for f in info.get('formats', []):
-                if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('ext') == 'mp4':
+                # Проверяем, что кодеки существуют и не равны 'none'
+                if f.get('vcodec') != 'none' and f.get('acodec') != 'none':
                     download_links.append({
                         "quality": f.get('resolution', 'HD'),
-                        "format": "mp4",
+                        "format": f.get('ext', 'mp4'),
                         "url": f.get('url')
                     })
             
+            # 2. Ищем аудио отдельно
             audio_formats = [f for f in info.get('formats', []) if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
             if audio_formats:
                 best_audio = sorted(audio_formats, key=lambda x: x.get('abr', 0))[-1]
@@ -60,9 +61,22 @@ async def get_video_info(url: str):
                     "url": best_audio.get('url')
                 })
 
-            # Если ссылки не нашлись
+            # 3. ЕСЛИ нормальных видео нет (осталось только аудио или пусто), 
+            # берем видео БЕЗ ЗВУКА, чтобы сайт выдал хоть что-то
+            if len(download_links) <= 1: 
+                for f in info.get('formats', []):
+                    if f.get('vcodec') != 'none' and f.get('acodec') == 'none':
+                        download_links.append({
+                            "quality": f.get('resolution', 'HD') + " (Без звука)",
+                            "format": f.get('ext', 'mp4'),
+                            "url": f.get('url')
+                        })
+
             if not download_links:
-                 raise Exception("Видео доступно, но нет готовых MP4 форматов для скачивания.")
+                 raise Exception("Не найдено прямых ссылок для скачивания.")
+
+            # Фильтруем дубликаты и оставляем 4 лучших варианта
+            unique_links = list({v['quality']:v for v in download_links}.values())[::-1][:4]
 
             return {
                 "status": "success",
@@ -70,7 +84,7 @@ async def get_video_info(url: str):
                     "title": info.get('title', 'Неизвестное видео'),
                     "duration": info.get('duration_string', '??:??')
                 },
-                "download_links": list({v['quality']:v for v in download_links}.values())[::-1][:3]
+                "download_links": unique_links
             }
             
     except Exception as e:
@@ -84,5 +98,6 @@ app.mount("/", StaticFiles(directory=".", html=True), name="static")
 if __name__ == "__main__":
 
     uvicorn.run(app, host="127.0.0.1", port=8000)
+
 
 
