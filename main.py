@@ -24,10 +24,11 @@ async def get_video_info(url: str):
         raise HTTPException(status_code=400, detail="Нужна корректная ссылка на YouTube")
     
     ydl_opts = {
+            'format': 'all', # Берем абсолютно всё, чтобы не было ошибки форматов
             'quiet': True,
             'no_warnings': True,
-            'cookiefile': 'cookies.txt', # Куки работают, оставляем!
-            # МАГИЮ АНДРОИДА УБРАЛИ, чтобы вернуть целые видео
+            'cookiefile': 'cookies.txt', 
+            'extractor_args': {'youtube': {'client': ['android', 'web']}}, # ВОЗВРАЩАЕМ АНДРОИД (спасает от бана!)
             'skip_download': True,
             'ignoreerrors': True
         }
@@ -36,55 +37,62 @@ async def get_video_info(url: str):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             
-            if not info:
-                raise Exception("YouTube заблокировал запрос. Нужны новые cookies.")
+            if not info or 'formats' not in info:
+                raise Exception("YouTube заблокировал запрос. Проверьте cookies.")
             
             download_links = []
+            formats = info.get('formats', [])
             
-            # 1. Ищем форматы, где сразу есть И видео, И звук
-            for f in info.get('formats', []):
-                # Проверяем, что кодеки существуют и не равны 'none'
-                if f.get('vcodec') != 'none' and f.get('acodec') != 'none':
-                    download_links.append({
-                        "quality": f.get('resolution', 'HD'),
-                        "format": f.get('ext', 'mp4'),
-                        "url": f.get('url')
-                    })
+            # 1. Пытаемся найти готовые видео со звуком (MP4)
+            merged = [f for f in formats if str(f.get('vcodec', 'none')).lower() != 'none' and str(f.get('acodec', 'none')).lower() != 'none' and f.get('ext') == 'mp4']
+            for f in merged:
+                download_links.append({
+                    "quality": f.get('resolution', 'HD'),
+                    "format": "mp4",
+                    "url": f.get('url')
+                })
             
-            # 2. Ищем аудио отдельно
-            audio_formats = [f for f in info.get('formats', []) if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
-            if audio_formats:
-                best_audio = sorted(audio_formats, key=lambda x: x.get('abr', 0))[-1]
+            # 2. Ищем лучшее Аудио
+            audio = [f for f in formats if str(f.get('acodec', 'none')).lower() != 'none' and str(f.get('vcodec', 'none')).lower() == 'none']
+            if audio:
+                best_audio = sorted(audio, key=lambda x: x.get('abr', 0))[-1]
                 download_links.append({
                     "quality": "Аудио",
-                    "format": "m4a",
+                    "format": best_audio.get('ext', 'm4a'),
                     "url": best_audio.get('url')
                 })
+            
+            # 3. Ищем видео БЕЗ ЗВУКА в высоком качестве (MP4)
+            video_only = [f for f in formats if str(f.get('vcodec', 'none')).lower() != 'none' and str(f.get('acodec', 'none')).lower() == 'none' and f.get('ext') == 'mp4']
+            if video_only:
+                best_video = sorted(video_only, key=lambda x: x.get('height', 0), reverse=True)
+                for f in best_video[:2]: # Берем 2 лучших качества
+                    quality_name = f.get('resolution', f"{f.get('height', 'HD')}p")
+                    download_links.append({
+                        "quality": f"{quality_name} (Без звука)",
+                        "format": "mp4",
+                        "url": f.get('url')
+                    })
 
-            # 3. ЕСЛИ нормальных видео нет (осталось только аудио или пусто), 
-            # берем видео БЕЗ ЗВУКА, чтобы сайт выдал хоть что-то
-            if len(download_links) <= 1: 
-                for f in info.get('formats', []):
-                    if f.get('vcodec') != 'none' and f.get('acodec') == 'none':
-                        download_links.append({
-                            "quality": f.get('resolution', 'HD') + " (Без звука)",
-                            "format": f.get('ext', 'mp4'),
-                            "url": f.get('url')
-                        })
+            # Если вообще ничего не подошло (экстренный случай)
+            if not download_links and formats:
+                best_any = formats[-1]
+                download_links.append({
+                    "quality": "Доступный формат",
+                    "format": best_any.get('ext', 'mp4'),
+                    "url": best_any.get('url')
+                })
 
-            if not download_links:
-                 raise Exception("Не найдено прямых ссылок для скачивания.")
-
-            # Фильтруем дубликаты и оставляем 4 лучших варианта
-            unique_links = list({v['quality']:v for v in download_links}.values())[::-1][:4]
-
+            # Убираем дубликаты
+            unique_links = list({v['quality']:v for v in download_links}.values())
+            
             return {
                 "status": "success",
                 "video_details": {
                     "title": info.get('title', 'Неизвестное видео'),
                     "duration": info.get('duration_string', '??:??')
                 },
-                "download_links": unique_links
+                "download_links": unique_links[:5] # Отдаем топ 5 вариантов
             }
             
     except Exception as e:
@@ -98,6 +106,7 @@ app.mount("/", StaticFiles(directory=".", html=True), name="static")
 if __name__ == "__main__":
 
     uvicorn.run(app, host="127.0.0.1", port=8000)
+
 
 
 
