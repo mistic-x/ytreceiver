@@ -1,8 +1,9 @@
+import re
+import json
+import urllib.request
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles # <-- Добавили этот импорт
-import yt_dlp
-import uvicorn
+from fastapi.staticfiles import StaticFiles
 import mimetypes
 
 # Чиним баг Windows с чтением CSS и JS файлов
@@ -18,102 +19,89 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Функция для вытаскивания ID видео (например, dQw4w9WgXcQ) из любой ссылки
+def extract_video_id(url: str):
+    match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11}).*", url)
+    return match.group(1) if match else None
+
 @app.get("/api/get-video-info")
 async def get_video_info(url: str):
-    if "youtube.com" not in url and "youtu.be" not in url:
+    video_id = extract_video_id(url)
+    if not video_id:
         raise HTTPException(status_code=400, detail="Нужна корректная ссылка на YouTube")
     
-    ydl_opts = {
-            'format': 'all',
-            'quiet': True,
-            'no_warnings': True,
-            'cookiefile': 'cookies.txt', 
-            # ВОТ ОНА МАГИЯ: Притворяемся Smart TV и Web, а не Андроидом
-            'extractor_args': {'youtube': {'client': ['tv', 'web']}}, 
-            'skip_download': True,
-            'ignoreerrors': True
-        }
+    # Список публичных серверов-помощников (если один упадет, код пойдет к следующему)
+    instances = [
+        "https://vid.puffyan.us",
+        "https://invidious.jing.rocks",
+        "https://invidious.nerdvpn.de"
+    ]
     
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+    data = None
+    for instance in instances:
+        api_url = f"{instance}/api/v1/videos/{video_id}"
+        try:
+            # Стучимся к чужому серверу
+            req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=5) as response:
+                data = json.loads(response.read().decode())
+                break # Если получилось, выходим из цикла
+        except Exception:
+            continue # Если сервер не ответил, пробуем следующий
             
-            if not info or 'formats' not in info:
-                raise Exception("YouTube заблокировал запрос. Проверьте cookies.")
-            
-            download_links = []
-            formats = info.get('formats', [])
-            
-            # 1. Пытаемся найти готовые видео со звуком (MP4)
-            merged = [f for f in formats if str(f.get('vcodec', 'none')).lower() != 'none' and str(f.get('acodec', 'none')).lower() != 'none' and f.get('ext') == 'mp4']
-            for f in merged:
-                download_links.append({
-                    "quality": f.get('resolution', 'HD'),
-                    "format": "mp4",
-                    "url": f.get('url')
-                })
-            
-            # 2. Ищем лучшее Аудио
-            audio = [f for f in formats if str(f.get('acodec', 'none')).lower() != 'none' and str(f.get('vcodec', 'none')).lower() == 'none']
-            if audio:
-                best_audio = sorted(audio, key=lambda x: x.get('abr', 0))[-1]
-                download_links.append({
-                    "quality": "Аудио",
-                    "format": best_audio.get('ext', 'm4a'),
-                    "url": best_audio.get('url')
-                })
-            
-            # 3. Ищем видео БЕЗ ЗВУКА в высоком качестве (MP4)
-            video_only = [f for f in formats if str(f.get('vcodec', 'none')).lower() != 'none' and str(f.get('acodec', 'none')).lower() == 'none' and f.get('ext') == 'mp4']
-            if video_only:
-                best_video = sorted(video_only, key=lambda x: x.get('height', 0), reverse=True)
-                for f in best_video[:2]: # Берем 2 лучших качества
-                    quality_name = f.get('resolution', f"{f.get('height', 'HD')}p")
-                    download_links.append({
-                        "quality": f"{quality_name} (Без звука)",
-                        "format": "mp4",
-                        "url": f.get('url')
-                    })
+    if not data:
+        raise HTTPException(status_code=400, detail="Не удалось обойти защиту. Попробуйте позже или другое видео.")
 
-            # 4. Если остался только мусор — жестко фильтруем картинки
-            if not download_links:
-                valid_fallback = [f for f in formats if f.get('ext') not in ['mhtml', 'jpg', 'webp', 'sb3'] and 'storyboard' not in str(f.get('format_id', '')).lower()]
-                if valid_fallback:
-                    best_any = valid_fallback[-1]
-                    download_links.append({
-                        "quality": "Доступный формат",
-                        "format": best_any.get('ext', 'mp4'),
-                        "url": best_any.get('url')
-                    })
-
-            # Убираем дубликаты
-            unique_links = list({v['quality']:v for v in download_links}.values())
+    # Форматируем длительность (секунды в MM:SS)
+    length_sec = data.get("lengthSeconds", 0)
+    mins, secs = divmod(length_sec, 60)
+    
+    download_links = []
+    
+    # 1. Ищем готовые целые видео (MP4)
+    for f in data.get("formatStreams", []):
+        if f.get("container") == "mp4":
+            download_links.append({
+                "quality": f.get("qualityLabel", "HD"),
+                "format": "mp4",
+                "url": f.get("url")
+            })
             
-            if not unique_links:
-                 raise Exception("Ютуб выдал только картинки-пустышки. Попробуйте другое видео.")
-
-            return {
-                "status": "success",
-                "video_details": {
-                    "title": info.get('title', 'Неизвестное видео'),
-                    "duration": info.get('duration_string', '??:??')
-                },
-                "download_links": unique_links[:5] # Отдаем топ 5 вариантов
-            }
+    # 2. Ищем Аудио
+    for f in data.get("adaptiveFormats", []):
+        if f.get("type", "").startswith("audio/mp4"):
+            download_links.append({
+                "quality": "Аудио",
+                "format": "m4a",
+                "url": f.get("url")
+            })
+            break # Нам хватит одного хорошего аудио файла
             
-    except Exception as e:
-        print(f"Ошибка: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+    # 3. Ищем видео без звука
+    for f in data.get("adaptiveFormats", []):
+        if f.get("type", "").startswith("video/mp4") and f.get("qualityLabel"):
+            download_links.append({
+                "quality": f"{f.get('qualityLabel')} (Без звука)",
+                "format": "mp4",
+                "url": f.get("url")
+            })
 
-# <-- ДОБАВИЛИ ЭТУ СТРОКУ (обязательно после @app.get) -->
-# Она говорит серверу: "Всё остальное ищи в текущей папке и отдавай как файлы (HTML, CSS, JS)"
+    # Убираем дубликаты
+    unique_links = []
+    seen = set()
+    for link in download_links:
+        if link["quality"] not in seen:
+            seen.add(link["quality"])
+            unique_links.append(link)
+
+    # Отдаем данные нашему фронтенду в привычном для него виде
+    return {
+        "status": "success",
+        "video_details": {
+            "title": data.get("title", "Неизвестное видео"),
+            "duration": f"{mins}:{secs:02d}"
+        },
+        "download_links": unique_links[:5]
+    }
+
 app.mount("/", StaticFiles(directory=".", html=True), name="static")
-
-if __name__ == "__main__":
-
-    uvicorn.run(app, host="127.0.0.1", port=8000)
-
-
-
-
-
