@@ -37,6 +37,10 @@ async def get_video_info(url: str):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             
+            # Если info пустое, значит Ютуб забанил куки
+            if not info:
+                raise Exception("YouTube заблокировал запрос. Нужны новые cookies.txt")
+            
             download_links = []
             
             for f in info.get('formats', []):
@@ -56,6 +60,10 @@ async def get_video_info(url: str):
                     "url": best_audio.get('url')
                 })
 
+            # Если ссылки не нашлись
+            if not download_links:
+                 raise Exception("Видео доступно, но нет готовых MP4 форматов для скачивания.")
+
             return {
                 "status": "success",
                 "video_details": {
@@ -67,7 +75,7 @@ async def get_video_info(url: str):
             
     except Exception as e:
         print(f"Ошибка: {e}")
-        raise HTTPException(status_code=400, detail="Не удалось обработать видео.")
+        raise HTTPException(status_code=400, detail=str(e))
 
 # <-- ДОБАВИЛИ ЭТУ СТРОКУ (обязательно после @app.get) -->
 # Она говорит серверу: "Всё остальное ищи в текущей папке и отдавай как файлы (HTML, CSS, JS)"
@@ -76,4 +84,5 @@ app.mount("/", StaticFiles(directory=".", html=True), name="static")
 if __name__ == "__main__":
 
     uvicorn.run(app, host="127.0.0.1", port=8000)
+
 
