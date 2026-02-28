@@ -24,11 +24,13 @@ async def get_video_info(url: str):
         raise HTTPException(status_code=400, detail="Нужна корректная ссылка на YouTube")
     
     ydl_opts = {
+            'format': 'all', # <--- Берем все форматы, не ищем "лучший", чтобы не было ошибки
             'quiet': True,
             'no_warnings': True,
             'cookiefile': 'cookies.txt', 
             'extractor_args': {'youtube': {'client': ['android', 'web']}},
-            'skip_download': True
+            'skip_download': True,
+            'ignoreerrors': True # <--- Игнорируем мелкие ошибки Ютуба, чтобы сервер не крашился
         }
     
     try:
@@ -74,3 +76,4 @@ app.mount("/", StaticFiles(directory=".", html=True), name="static")
 if __name__ == "__main__":
 
     uvicorn.run(app, host="127.0.0.1", port=8000)
+
