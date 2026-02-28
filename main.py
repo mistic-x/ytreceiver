@@ -24,11 +24,12 @@ async def get_video_info(url: str):
         raise HTTPException(status_code=400, detail="Нужна корректная ссылка на YouTube")
     
     ydl_opts = {
-            'format': 'all', # Берем абсолютно всё, чтобы не было ошибки форматов
+            'format': 'all',
             'quiet': True,
             'no_warnings': True,
             'cookiefile': 'cookies.txt', 
-            'extractor_args': {'youtube': {'client': ['android', 'web']}}, # ВОЗВРАЩАЕМ АНДРОИД (спасает от бана!)
+            # ВОТ ОНА МАГИЯ: Притворяемся Smart TV и Web, а не Андроидом
+            'extractor_args': {'youtube': {'client': ['tv', 'web']}}, 
             'skip_download': True,
             'ignoreerrors': True
         }
@@ -74,18 +75,23 @@ async def get_video_info(url: str):
                         "url": f.get('url')
                     })
 
-            # Если вообще ничего не подошло (экстренный случай)
-            if not download_links and formats:
-                best_any = formats[-1]
-                download_links.append({
-                    "quality": "Доступный формат",
-                    "format": best_any.get('ext', 'mp4'),
-                    "url": best_any.get('url')
-                })
+            # 4. Если остался только мусор — жестко фильтруем картинки
+            if not download_links:
+                valid_fallback = [f for f in formats if f.get('ext') not in ['mhtml', 'jpg', 'webp', 'sb3'] and 'storyboard' not in str(f.get('format_id', '')).lower()]
+                if valid_fallback:
+                    best_any = valid_fallback[-1]
+                    download_links.append({
+                        "quality": "Доступный формат",
+                        "format": best_any.get('ext', 'mp4'),
+                        "url": best_any.get('url')
+                    })
 
             # Убираем дубликаты
             unique_links = list({v['quality']:v for v in download_links}.values())
             
+            if not unique_links:
+                 raise Exception("Ютуб выдал только картинки-пустышки. Попробуйте другое видео.")
+
             return {
                 "status": "success",
                 "video_details": {
@@ -106,6 +112,7 @@ app.mount("/", StaticFiles(directory=".", html=True), name="static")
 if __name__ == "__main__":
 
     uvicorn.run(app, host="127.0.0.1", port=8000)
+
 
 
 
