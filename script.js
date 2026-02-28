@@ -171,7 +171,7 @@ document.getElementById('download-form').addEventListener('submit', async functi
     submitBtn.disabled = true;
 
     try {
-        const response = await fetch(`http://127.0.0.1:8000/api/get-video-info?url=${encodeURIComponent(urlInput)}`);
+        const response = await fetch(`/api/get-video-info?url=${encodeURIComponent(urlInput)}`);
         
         if (!response.ok) {
             throw new Error('Server error');
@@ -205,4 +205,5 @@ document.getElementById('download-form').addEventListener('submit', async functi
         loadingDiv.classList.add('hidden');
         submitBtn.disabled = false;
     }
+
 });
